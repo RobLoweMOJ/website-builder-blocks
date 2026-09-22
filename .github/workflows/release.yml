@@ -65,6 +65,12 @@ jobs:
           node-version: '22'
           cache: npm
 
+      # Node 22 ships npm 10, but package-lock.json is written by npm 11,
+      # which npm 10's `npm ci` rejects as out of sync.
+      - name: Use npm 11
+        if: steps.version.outputs.release == 'true'
+        run: npm install -g npm@11
+
       - name: Install dependencies
         if: steps.version.outputs.release == 'true'
         run: npm ci --no-audit --no-fund
