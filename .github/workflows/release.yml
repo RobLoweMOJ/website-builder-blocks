@@ -46,7 +46,9 @@ jobs:
             exit 0
           fi
 
-          LATEST=$(git tag -l '[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -n1)
+          # Only strict X.Y.Z tags count as releases (ignores preview-* tags).
+          LATEST=$(git tag -l | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n1)
+          echo "latest=$LATEST" >> "$GITHUB_OUTPUT"
           if [ -n "$LATEST" ]; then
             HIGHEST=$(printf '%s\n%s\n' "$LATEST" "$VERSION" | sort -V | tail -n1)
             if [ "$HIGHEST" != "$VERSION" ]; then
@@ -106,3 +108,5 @@ jobs:
           files: website-builder-blocks-${{ steps.version.outputs.version }}.zip
           fail_on_unmatched_files: true
           generate_release_notes: true
+          # Compare against the last real release, never a preview.
+          previous_tag: ${{ steps.version.outputs.latest }}

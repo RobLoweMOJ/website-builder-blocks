@@ -1,0 +1,130 @@
+name: Build preview
+
+# Manually builds any branch into a pre-release zip, so a branch can be
+# installed on a shared environment (dev/staging) before it's released.
+#
+#   Actions tab -> "Build preview" -> Run workflow -> pick the branch
+#   or: gh workflow run preview.yml --ref my-branch
+#
+# Each run publishes a pre-release tagged preview-<branch>-<short sha>.
+# Previews are never marked as latest and are ignored by release.yml.
+# Delete them once testing is done, e.g.:
+#   gh release delete preview-my-branch-a1b2c3d --cleanup-tag --yes
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: preview-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  preview:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check a branch was chosen
+        if: github.ref_type != 'branch'
+        run: |
+          echo "::error::Run this workflow on a branch, not a tag."
+          exit 1
+
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Name the preview
+        id: preview
+        run: |
+          SHORT_SHA="${GITHUB_SHA::7}"
+          # Branch name -> tag-safe slug, e.g. "feature/Nav_Fix" -> "feature-nav-fix"
+          SLUG=$(printf '%s' "$GITHUB_REF_NAME" | tr '[:upper:]' '[:lower:]' \
+            | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//' | cut -c1-40 | sed -E 's/-+$//')
+          TAG="preview-${SLUG}-${SHORT_SHA}"
+          VERSION=$(grep -m1 -oP 'Version:\s*\K\S+' website-builder-blocks.php)
+          {
+            echo "tag=$TAG"
+            echo "short_sha=$SHORT_SHA"
+            echo "plugin_version=${VERSION}-preview.${SHORT_SHA}"
+          } >> "$GITHUB_OUTPUT"
+          echo "Preview tag: $TAG"
+
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+          cache: npm
+
+      # Node 22 ships npm 10, but package-lock.json is written by npm 11,
+      # which npm 10's `npm ci` rejects as out of sync.
+      - name: Use npm 11
+        run: npm install -g npm@11
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      # postbuild runs verify:assets, which checks the script handles.
+      - name: Build assets
+        run: npm run build
+
+      - name: Assemble preview package
+        env:
+          TAG: ${{ steps.preview.outputs.tag }}
+          PLUGIN_VERSION: ${{ steps.preview.outputs.plugin_version }}
+        run: |
+          PKG_DIR="dist/website-builder-blocks"
+          mkdir -p "$PKG_DIR"
+          rsync -a --exclude='scss/' build assets languages "$PKG_DIR/"
+          # Only the PHP in src/ is used at runtime; everything else there
+          # is build input and ends up compiled or copied into build/.
+          rsync -a --prune-empty-dirs \
+            --include='*/' --include='*.php' --exclude='*' \
+            src "$PKG_DIR/"
+          cp website-builder-blocks.php composer.json README.md "$PKG_DIR/"
+          # Show the preview in the WordPress plugins list, e.g. 2.3.2-preview.a1b2c3d
+          sed -i -E "0,/Version:/s/(Version:[[:space:]]*)[^[:space:]]+/\1${PLUGIN_VERSION}/" \
+            "$PKG_DIR/website-builder-blocks.php"
+          grep -m1 'Version:' "$PKG_DIR/website-builder-blocks.php"
+          (cd dist && zip -rq "../website-builder-blocks-${TAG}.zip" website-builder-blocks)
+          unzip -l "website-builder-blocks-${TAG}.zip" | tail -n1
+
+      - name: Write release notes
+        env:
+          TAG: ${{ steps.preview.outputs.tag }}
+          REPO: ${{ github.repository }}
+        run: |
+          cat > preview-notes.md <<EOF
+          Preview build of \`${GITHUB_REF_NAME}\` at ${GITHUB_SHA}. **Not for production.**
+
+          To install it in hale-platform, replace the plugin's entry in \`repositories\` with:
+
+          \`\`\`json
+          {
+            "type": "package",
+            "package": {
+              "name": "ministryofjustice/website-builder-blocks",
+              "version": "dev-${TAG}",
+              "type": "wordpress-plugin",
+              "dist": {
+                "type": "zip",
+                "url": "https://github.com/${REPO}/releases/download/${TAG}/website-builder-blocks-${TAG}.zip"
+              }
+            }
+          }
+          \`\`\`
+
+          and require \`"ministryofjustice/website-builder-blocks": "dev-${TAG}"\`.
+          EOF
+
+      - name: Publish pre-release
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        with:
+          tag_name: ${{ steps.preview.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          name: "Preview: ${{ github.ref_name }} @ ${{ steps.preview.outputs.short_sha }}"
+          body_path: preview-notes.md
+          prerelease: true
+          make_latest: false
+          files: website-builder-blocks-${{ steps.preview.outputs.tag }}.zip
+          fail_on_unmatched_files: true
+          overwrite_files: true
